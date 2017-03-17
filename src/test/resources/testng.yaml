@@ -1,0 +1,12 @@
+name: Default Suite
+
+tests:
+  - name: Monjeri
+    classes:
+      - org.monjeri.AttemptTest
+      - org.monjeri.ListTest
+      - org.monjeri.PathTest
+      - org.monjeri.UtilTest
+      - org.monjeri.JsonTest
+      - org.monjeri.MonjeriTest
+      - org.monjeri.MonTaskTest

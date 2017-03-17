@@ -1,0 +1,331 @@
+#+title: Monjeri
+
+Monjeri is a library providing a thin layer on top of the official
+mongodb java driver. It requires Java 8 and makes heavy use of its
+functional language features. If you have to use MongoDB and Java,
+this library may be useful.
+
+It is different to other libraries in that it first is *not* an
+ODM. It also doesn't use reflection (nor annotations) to create a
+mapping between java objects and mongodbs output.
+
+The goal is to use the driver more conveniently from java, i.e. to
+focus more on the use of mongodb's atomic operations (in contrast to
+“replace whole document” approach). It provides a basis for converting
+between json and java objects. Json values can be created more
+conveniently from Java using the ~Json~ class. And a set of basic
+mongodb tasks to start from is included.
+
+Everything evolves around a ~MonTask~ which encapsulates code related
+to MongoDB. These tasks can be combined and finally be run. The
+~Monjeri~ interface contains tasks that wrap certain features from the
+mongodb driver.
+
+Note: this is a new library and should be seen as a proof of
+concept. So any feedback is much appreciated.
+
+Example usage:
+
+#+begin_src java :exports code
+  // this creates a task, nothing happens yet
+  public MonTask1<Stream<User>> findUser(String username) {
+      return db()
+          .map(collection("users"))
+          .map(query(Json.obj("username", Json.str(username))))
+          .map(decode(codec.decodeUser()));
+  }
+
+  // this will run the code given a connection to mongodb
+  Stream<User> result = findUser("eike").run(new MongoClient());
+#+end_src
+
+Here is the explanation: ~findUser~ should return all users with a
+given username. The returned value is a ~MonTask1~, which returns the
+desired result given a ~MongoClient~ as input. It is comprised of
+other tasks: At first, the task ~db()~ is takes a ~MongoClient~ and
+returns back a ~MongoDatabase~. Then ~collection("users")~ selects the
+=users= collection. Now a query is executed on this collection and the
+result is decoded using the decoder ~codec.decodeUser()~.  The ~map~
+only applies another task to the result of the first. It can be seen
+as an ~andThen~. So the essence is to be able to compose many small
+tasks into larger ones.
+
+The ~map~ (precisely the ~flatMap~) operation on tasks are stack
+safe. Thus, it is safe to ~map~ a lot of tasks (i.e. in a loop).
+
+For a more detailed example, look at the sources of the Todo
+Application in =org/monjeri/example/todo=. You can start the todo app
+by running ~sbt test:run [--host localhost] [--port 27017]~. The app
+can be configured to connect to some host and port; default is
+~localhost:27017~. A running mongodb is required. This is a very basic
+console-menu-driven application, only meant to be an example.
+
+* Encoding and Decoding Json
+
+In order to create json from a java object you must implement an
+instance of ~Decode~ for it. If you want to serialise an object into
+json, you must implement an ~Encode~ instance. There is no automatic
+en/decoding via reflection or other magic.
+
+** Decoding
+
+But there are some efforts to ease writing these decoders. The
+~BaseDecode~ interface defines some decoders that can be used to
+create other ones. For example the ~doc(Path)~ decoder returns the
+document at the given path.
+
+Example decoder for a ~Person~ class consisting of a ~firstname~ and
+an ~age~ property:
+
+#+begin_src java :exports code
+public Decode<Person> person(Path path) {
+  return doc(path).map(doc -> new Person(
+      string(Path.single("firstname")).apply(doc),
+      integer(Path.single("age")).apply(doc)
+  ));
+}
+#+end_src
+
+** Encoding
+
+Encoding works analog to decoding, just that the object is converted
+into a ~Json~ type. The ~Json~ class contains various constructors to
+help creating these values. The ~BaseEncode~ interface contains a few
+predefined encoders.
+
+Example encoder for the ~Person~ class:
+
+#+begin_src java :exports code
+public Encode.Object<Person> person() {
+  return p -> Json.obj(
+    entry("firstname", Json.str(p.getName())),
+    entry("age", Json.num(p.getAge()))
+  );
+}
+#+end_src
+
+The ~Encode.Object~ is a special encoder in that it requires you to
+return not an arbitrary ~Json~ value, but a ~JObject~, because in the
+end mongo needs a ~Document~ to store.
+
+** Codec
+
+A recommended way is to create a class holding all your encoders and
+decoders, a codec. It can implement ~BaseEncode~ and ~BaseDecode~ to
+have all predefined functions in scope.
+
+* Query
+
+A query returns a special ~Iterable~ from the mongodb driver. This can
+be “decoded” into a java ~Stream~ using the ~Monjeri.decode~ function
+given a ~Decode~ instance for your type.
+
+#+begin_src java :exports code
+MonTask1<Stream<String>> findStreet = testdb
+  .map(collection("address"))
+  .map(query(Json.obj("street", Json.str("fox avenue 3"))))
+  .map(project(Json.obj("street", Json.True())))
+  .map(limit(10))
+  .map(decode(codec.string(Path.single("street"))));
+#+end_src
+
+The ~query~ function returns mongo's ~FindIterable~ that can be
+further configured using for example ~limit~ or ~project~. The
+~project~ function adds a projection to the query. At last the
+documents are decoded into a stream of strings and only the street
+name is fetched from the document.
+
+MongoDB always returns the ~_id~ with a result. If you like to also
+retrieve the id, wrap your decoder into the ~withId~ decoder:
+
+#+begin_src java :exports code
+MonTask1<Stream<IdAnd<ObjectId, String>>> findStreet = testdb
+  .map(collection("address"))
+  .map(query(Json.obj("street", Json.regex("^fox avenue"))))
+  .map(project(Json.obj("street", Json.True())))
+  .map(limit(10))
+  .map(decode(codec.withObjectId(codec.string(Path.single("street")))));
+#+end_src
+
+The ~Id~ type associates an ~ObjectId~ with some other value. Both
+decoders used in the example are provided in ~BaseDecode~ (corresponds
+to variable ~codec~ in the example).
+
+
+* Aggregate
+
+TODO
+
+* Insert/Update
+
+TODO
+
+* Model and Indexes
+
+The package ~org.monjeri.model~ contains classes to allow to specify a
+type or model for a document. There are two main purposes:
+
+1) Omit using strings. The examples above use string literals for
+   paths in the document (e.g. ~"address"~ or ~"street"~). This can
+   break easily but using simple constants doesn't cut it: Sometimes a
+   path is needed, sometimes only the name. For arrays the path may be
+   amended with an index or the ~$~. Implementing a model allows to
+   reuse paths and names. Never use strings to refer to fields and
+   collections.
+
+2) Record additional metadata that can be later used to maybe validate
+   a value against the declared types or create indexes etc.
+
+See the model for the todo application in the =examples= package:
+
+#+begin_src java :exports code
+  public static class Model {
+      public final UserModel user = new UserModel();
+      public final TodoListModel todoList = new TodoListModel();
+
+      public static class UserModel extends org.monjeri.model.Document {
+          public static final String NAME = "users";
+
+          public final Field<Atom> _id = _idField();
+          public final Field<Atom> username = addField("username", Atom.string()).unique();
+          public final Field<Atom> firstname = addField("firstname", Atom.string());
+
+          public UserModel() {
+              super(Path.root);
+          }
+
+          public final String name() {
+              return NAME;
+          }
+      }
+
+      public static class TodoModel extends org.monjeri.model.Document {
+          public final Field<Atom> title = addField("title", Atom.string());
+          public final Field<Atom> checked = addField("checked", Atom.bool());
+          public final Field<Atom> position = addField("position", Atom.number());
+
+          public TodoModel(Path basePath) {
+              super(basePath);
+          }
+      }
+
+      public static class TodoListModel extends org.monjeri.model.Document {
+          public static final String NAME = "todolists";
+
+          public final Field<Atom> _id = _idField();
+          public final Field<Atom> title = addField("title", Atom.string());
+          public final Field<Ref> owner = addField("owner", Ref.create(UserModel.NAME));
+          public final Array<TodoModel> todos = arrayField("todos", TodoModel::new).type();
+          public final Field created = addField("created", Atom.string());
+
+          public TodoListModel() {
+              super(Path.root);
+              addIndex(Json.obj(
+                ofPath(title, Json.num(1)),
+                ofPath(owner, Json.num(1))),
+                cfg -> cfg.unique(true));
+          }
+
+          public final String name() {
+              return NAME;
+          }
+      }
+  }
+#+end_src
+
+There are two top-level documents: =User= and =TodoList=. The
+=TodoList= embeds an array of =Todo= documents. Each document simply
+defines its set of fields. Indexes can be specified for each field or
+for multiple fields using ~addIndex~.
+
+Top level documents are constructed with an empty path, thus the
+constructor for =User= and =TodoList= is overriden in a fixed
+way. Additionally the =name()= method is overriden to specify the
+collection name. The default impl simply returns the last element of
+the path (which is empty for top level documents).
+
+This allows the following usage:
+
+#+begin_src java :exports code
+  // Decoder for user
+  public Decode<User> decodeUser() {
+      return doc -> new User(
+         string(model.user.username.nameAsPath()).apply(doc),
+         stringNullable(model.user.firstname.nameAsPath()).apply(doc));
+  }
+
+  // insert new user
+  public MonTask1<ObjectId> insertUser(User user) {
+      return db()
+        .map(model.user) // uses model.user.name() to retrieve the collection
+        .map(insert(codec.encodeUser().apply(user)))
+        .map(castToObjectId());
+  }
+
+  // change checked flag for a todo item
+  public MonTask1<UpdateResult> checkTodoItem(ObjectId listId, Todo item, boolean flag) {
+    Array<Model.TodoModel> todos = model.todoList.todos;
+    return db()
+      .map(model.todoList)
+      .map(updateOne(
+          Json.JObject.byId(listId)
+            .putPath(todos.element().title, Json.str(item.getName()))
+            .putPath(todos.element().checked, Json.of(item.isChecked())),
+          Json.obj("$set", Json.obj(
+            ofPath(todos.each().checked, Json.of(flag))))));
+  }
+#+end_src
+
+The model definition can be reused for creating decoders or queries
+and updates. The (imho awkward) update and query language of mongodb
+is not abstracted. It must be used as is by creating the json values
+needed.
+
+The model definition can be printed as json for better human
+inspection. The model for =TodoList= looks like this:
+
+#+begin_src javascript :exports code
+{
+    "created": "STRING",
+    "todos": [
+        {
+            "position": "NUMBER",
+            "checked": "BOOL",
+            "title": "STRING"
+        }
+    ],
+    "owner": {
+        "target": "users",
+        "type": "DBREF"
+    },
+    "title": "STRING",
+    "_id": "OBJECT_ID"
+}
+#+end_src
+
+* Migration
+
+There is a basic sketch of managing tasks for database maintenance in
+package ~org.monjeri.migrate~. The idea is to define tasks with
+initial mainenance code, like creating indexes, adding initial data,
+etc. and have it run on application startup.
+
+For example, the todo app uses this code:
+
+#+begin_src java :exports code
+  public MonTask1<List<Result>> initialize() {
+      Migration migration = new Migration(model);
+      List<Change> changes = List.of(
+          new SimpleChange("make indexes", "me", model.createIndexes()),
+          new SimpleChange("create admin account", "me", tasks.createAdminAccount("admin", "admin"))
+      );
+      return migration.migrate(changes);
+  }
+#+end_src
+
+The user defines tasks by implementing the ~Change~ interface which
+only adds two metadata fields to an otherwise plain ~MonTask~. The
+~migrate~ methods will take a list of changes and transform it into a
+single task that executes each one in a row and logs the result to a
+special collection. It also makes sure that an previously executed
+change will not execute again.
